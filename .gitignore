@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+data/
+.env
+.env.*
+!.env.example
+
+# Only the root README is published; planning and agent notes stay local.
+*.md
+!/README.md
