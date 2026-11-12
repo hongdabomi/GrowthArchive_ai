@@ -2,9 +2,12 @@
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
-from pydantic import Field, model_validator
+from typing import Annotated, Literal
+from pydantic import Field, StringConstraints, model_validator
 from schemas.common import StrictModel, Text, Identifier, Change
+
+
+NonBlank = Annotated[str, StringConstraints(pattern=r"\S")]
 
 
 class GrowthType(StrEnum):
@@ -16,11 +19,11 @@ class GrowthType(StrEnum):
 
 
 LABELS = {
-    "capability_expansion": ("능력 확장", "🛠️"),
-    "performance_improvement": ("성과 향상", "📈"),
-    "experience_accumulation": ("경험 축적", "🌱"),
-    "efficiency_improvement": ("효율성 향상", "⏱️"),
-    "experience_transfer": ("경험 전이", "🔗"),
+    "capability_expansion": "능력 확장",
+    "performance_improvement": "성과 향상",
+    "experience_accumulation": "경험 축적",
+    "efficiency_improvement": "효율성",
+    "experience_transfer": "경험 전이",
 }
 
 
@@ -28,14 +31,26 @@ class EvidenceSelection(StrictModel):
     evidenceId: Identifier
 
 
-class ModelSide(StrictModel):
-    text: Text
-    evidence: list[EvidenceSelection] = Field(min_length=1, max_length=10)
-
-
 class ModelComparison(StrictModel):
-    before: ModelSide
-    after: ModelSide
+    before: NonBlank = Field(min_length=1, max_length=500)
+    after: NonBlank = Field(min_length=1, max_length=500)
+    condition: NonBlank = Field(min_length=1, max_length=500)
+    beforeEvidence: list[EvidenceSelection] = Field(min_length=1, max_length=10)
+    afterEvidence: list[EvidenceSelection] = Field(min_length=1, max_length=10)
+
+
+class ModelSourceActivity(StrictModel):
+    id: Identifier | None
+    name: NonBlank = Field(min_length=1, max_length=200)
+
+
+class ModelTransfer(StrictModel):
+    sourceActivity: ModelSourceActivity
+    experience: NonBlank = Field(min_length=1, max_length=500)
+    targetActivityId: Identifier
+    application: NonBlank = Field(min_length=1, max_length=500)
+    sourceEvidence: list[EvidenceSelection] = Field(min_length=1, max_length=10)
+    applicationEvidence: list[EvidenceSelection] = Field(min_length=1, max_length=10)
 
 
 class GrowthChecks(StrictModel):
@@ -50,19 +65,15 @@ class GrowthChecks(StrictModel):
 class ModelAssessment(StrictModel):
     growthType: GrowthType | None
     status: Literal["confirmed", "possible", "deferred"]
-    activityIds: list[Identifier] = Field(min_length=1, max_length=2)
-    title: Text
-    axis: str = Field(min_length=1, max_length=40)
-    description: Text
-    comparison: ModelComparison | None
+    reason: NonBlank = Field(min_length=1, max_length=500)
+    comparison: ModelComparison | None = None
+    transfer: ModelTransfer | None = None
     evidence: list[EvidenceSelection] = Field(min_length=1, max_length=10)
     missingEvidence: list[Text] = Field(max_length=10)
     checks: GrowthChecks
 
     @model_validator(mode="after")
     def consistent(self):
-        if len(set(self.activityIds)) != len(self.activityIds):
-            raise ValueError("활동 ID가 중복됩니다.")
         if self.status == "confirmed" and (self.growthType is None or self.missingEvidence):
             raise ValueError("성장 확인에는 유형과 충분한 근거가 필요합니다.")
         if self.status != "confirmed" and not self.missingEvidence:
@@ -85,7 +96,7 @@ class ActivityMetadata(StrictModel):
 class ContextRecord(StrictModel):
     id: Identifier
     activityId: Identifier
-    activityName: Text
+    activityName: Identifier
     message: str
     summary: Text
     changes: list[Change]
@@ -96,6 +107,8 @@ class ContextRecord(StrictModel):
 
 
 class JourneyContext(StrictModel):
+    schemaVersion: Literal["journey-result-v2"]
+    criteriaVersion: Literal["growth-criteria-v1"]
     records: list[ContextRecord] = Field(min_length=1, max_length=100)
     recordCount: int = Field(ge=1, le=100)
     sourceFingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -118,18 +131,26 @@ class JourneyContext(StrictModel):
 
 
 class ModelSummary(StrictModel):
-    title: Text
-    description: Text
+    title: NonBlank = Field(min_length=1, max_length=120)
+    description: NonBlank = Field(min_length=1, max_length=2000)
     evidence: list[EvidenceSelection] = Field(min_length=1, max_length=20)
 
 
 class ModelBadge(StrictModel):
-    label: str = Field(min_length=1, max_length=40)
-    icon: str = Field(min_length=1, max_length=16)
+    label: NonBlank = Field(min_length=1, max_length=80)
+    icon: NonBlank = Field(min_length=1, max_length=16)
     evidence: list[EvidenceSelection] = Field(min_length=1, max_length=5)
+
+
+class ModelEvent(StrictModel):
+    activityId: Identifier
+    axis: NonBlank = Field(min_length=1, max_length=40)
+    title: NonBlank = Field(min_length=1, max_length=120)
+    description: NonBlank = Field(min_length=1, max_length=1000)
+    growthAssessments: list[ModelAssessment] = Field(min_length=1, max_length=5)
 
 
 class JourneyModel(StrictModel):
     summary: ModelSummary
-    assessments: list[ModelAssessment] = Field(max_length=20)
+    events: list[ModelEvent] = Field(max_length=20)
     badges: list[ModelBadge] = Field(max_length=10)

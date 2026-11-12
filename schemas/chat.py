@@ -97,6 +97,17 @@ class LinkRequest(StrictModel):
     requestId: str | None = Field(default=None, min_length=1, max_length=200)
 
 
+class JobResponse(StrictModel):
+    jobId: Identifier
+    status: Literal["running", "completed", "failed"]
+    analysisProvider: Literal["openai"]
+    progress: dict | None = None
+    pollAfterMs: int | None = None
+    result: dict | None = None
+    code: str | None = None
+    error: str | None = None
+
+
 @dataclass(frozen=True)
 class UploadedFile:
     id: str
