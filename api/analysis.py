@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from core.errors import AnalysisError
 from schemas.activity import ActivityRequest
-from schemas.journey import JourneyContext
+from schemas.journey import JourneyContext, JourneyProviderResponse
 from activity_metadata import analyze_activity
 from journey import analyze_journey
 from material_delete import ExcludeFileRequest, analyze_remaining
@@ -33,8 +33,10 @@ async def activity(activity_id: str, payload: ActivityRequest, request: Request)
     return await analyze_activity(payload, request.app.state.settings)
 
 
-@router.post("/journey")
+@router.post("/journey", response_model=JourneyProviderResponse, response_model_exclude_unset=True)
 async def journey(payload: JourneyContext, request: Request):
+    if len((await request.body()).decode("utf-8")) > 250_000:
+        raise AnalysisError(422, "journey_context_limit", "Journey 요청 JSON 한도를 초과했어요.")
     return await analyze_journey(payload, request.app.state.settings)
 
 

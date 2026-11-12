@@ -195,6 +195,43 @@ class PublicApiTests(unittest.TestCase):
                                    headers={"Authorization": "Bearer internal-test"})
             self.assertEqual(response.status_code, 422)
 
+    def test_journey_openapi_response_and_raw_request_limit(self):
+        with self.client() as client:
+            schema = client.get("/openapi.json").json()
+            response_schema = schema["paths"]["/api/analyze/journey"]["post"]["responses"]["200"]
+            self.assertEqual(response_schema["content"]["application/json"]["schema"]["$ref"],
+                             "#/components/schemas/JourneyProviderResponse")
+            body = json.dumps(journey_context().model_dump(), ensure_ascii=False) + " " * 250_001
+            with patch("api.analysis.analyze_journey") as model:
+                response = client.post("/api/analyze/journey", content=body,
+                                       headers={"Authorization": "Bearer internal-test",
+                                                "Content-Type": "application/json"})
+            self.assertEqual(response.status_code, 422)
+            self.assertEqual(response.json()["code"], "journey_context_limit")
+            model.assert_not_called()
+
+    def test_journey_http_keeps_unregistered_source_null(self):
+        payload = journey_context(single=True)
+        payload.records[0].summary = "개인 프로젝트에서 배운 EC2 설정을 모델 프로젝트에 적용했어요."
+        data = growth_result(single=True)
+        item = data["events"][0]["growthAssessments"][0]
+        item.update(growthType="experience_transfer", comparison=None,
+                    transfer={"sourceActivity": {"id": None, "name": "개인 프로젝트"},
+                              "experience": "EC2 설정", "targetActivityId": "a1",
+                              "application": "모델 프로젝트에 적용",
+                              "sourceEvidence": [{"evidenceId": "evidence-1"}],
+                              "applicationEvidence": [{"evidenceId": "evidence-1"}]})
+        item["checks"]["explicitTransfer"] = True
+        with patch("journey.structured_response", return_value=JourneyModel.model_validate(data)):
+            provider_response = asyncio.run(analyze_journey(payload, self.settings))
+        with self.client() as client, patch("api.analysis.analyze_journey", return_value=provider_response):
+            response = client.post("/api/analyze/journey", json=payload.model_dump(),
+                                   headers={"Authorization": "Bearer internal-test"})
+        self.assertEqual(response.status_code, 200)
+        assessment = response.json()["result"]["events"][0]["growthAssessments"][0]
+        self.assertIsNone(assessment["transfer"]["sourceActivity"]["id"])
+        self.assertNotIn("comparison", assessment)
+
 
 class AnalysisTests(unittest.IsolatedAsyncioTestCase):
     settings = Settings(openai_api_key=SecretStr("test-key"))

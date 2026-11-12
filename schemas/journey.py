@@ -154,3 +154,87 @@ class JourneyModel(StrictModel):
     summary: ModelSummary
     events: list[ModelEvent] = Field(max_length=20)
     badges: list[ModelBadge] = Field(max_length=10)
+
+
+class JourneyEvidence(StrictModel):
+    recordId: Identifier
+    quote: NonBlank = Field(min_length=1, max_length=800)
+
+
+class JourneyComparison(StrictModel):
+    before: NonBlank = Field(min_length=1, max_length=500)
+    after: NonBlank = Field(min_length=1, max_length=500)
+    condition: NonBlank = Field(min_length=1, max_length=500)
+    beforeEvidence: list[JourneyEvidence] = Field(min_length=1, max_length=10)
+    afterEvidence: list[JourneyEvidence] = Field(min_length=1, max_length=10)
+
+
+class JourneyTransfer(StrictModel):
+    sourceActivity: ModelSourceActivity
+    experience: NonBlank = Field(min_length=1, max_length=500)
+    targetActivityId: Identifier
+    application: NonBlank = Field(min_length=1, max_length=500)
+    sourceEvidence: list[JourneyEvidence] = Field(min_length=1, max_length=10)
+    applicationEvidence: list[JourneyEvidence] = Field(min_length=1, max_length=10)
+
+
+class JourneyAssessment(StrictModel):
+    type: GrowthType
+    reason: NonBlank = Field(min_length=1, max_length=500)
+    evidence: list[JourneyEvidence] = Field(min_length=1, max_length=10)
+    comparison: JourneyComparison | None = None
+    transfer: JourneyTransfer | None = None
+
+
+class JourneySummary(StrictModel):
+    title: NonBlank = Field(min_length=1, max_length=120)
+    description: NonBlank = Field(min_length=1, max_length=2000)
+    evidence: list[JourneyEvidence] = Field(min_length=1, max_length=20)
+
+
+class JourneyBadge(StrictModel):
+    id: Identifier
+    label: NonBlank = Field(min_length=1, max_length=80)
+    icon: NonBlank = Field(min_length=1, max_length=16)
+    evidence: list[JourneyEvidence] = Field(min_length=1, max_length=5)
+
+
+class JourneyOption(StrictModel):
+    value: NonBlank = Field(min_length=1, max_length=80)
+    label: NonBlank = Field(min_length=1, max_length=40)
+
+
+class JourneyActivity(StrictModel):
+    id: Identifier
+    name: Identifier
+
+
+class JourneyEvent(StrictModel):
+    id: Identifier
+    occurredAt: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    activity: JourneyActivity
+    axis: NonBlank = Field(min_length=1, max_length=80)
+    title: NonBlank = Field(min_length=1, max_length=120)
+    description: NonBlank = Field(min_length=1, max_length=1000)
+    growthAssessments: list[JourneyAssessment] = Field(min_length=1, max_length=5)
+
+
+class JourneyResult(StrictModel):
+    schemaVersion: Literal["journey-result-v2"]
+    criteriaVersion: Literal["growth-criteria-v1"]
+    source: Literal["api"]
+    summary: JourneySummary
+    badges: list[JourneyBadge] = Field(max_length=10)
+    typeOptions: list[JourneyOption] = Field(min_length=6, max_length=6)
+    axisOptions: list[JourneyOption] = Field(min_length=1, max_length=9)
+    events: list[JourneyEvent] = Field(max_length=20)
+
+
+class JourneyProviderResponse(StrictModel):
+    schemaVersion: Literal["journey-result-v2"]
+    criteriaVersion: Literal["growth-criteria-v1"]
+    sourceFingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    recordCount: int = Field(ge=1, le=100)
+    model: NonBlank = Field(min_length=1, max_length=200)
+    promptVersion: Literal["journey-v6"]
+    result: JourneyResult
