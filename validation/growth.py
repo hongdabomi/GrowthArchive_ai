@@ -1,4 +1,4 @@
-"""성장 판단의 유형별 조건과 중첩 원문 근거를 검증한다."""
+# 성장 유형별 판단 조건 검증
 
 from core.errors import AnalysisError
 from validation.evidence import restore, check_evidence
