@@ -2,7 +2,10 @@
 
 import base64
 import binascii
+from io import BytesIO
 from pathlib import Path
+from pypdf import PdfReader
+from pypdf.errors import PdfReadError
 from core.errors import AnalysisError
 from schemas.chat import UploadedFile
 
@@ -41,6 +44,15 @@ def validate_files(files):
             raise AnalysisError(400, "invalid_file", "파일은 비어 있지 않아야 하고 각각 10MiB 이하여야 해요.")
         if Path(file.name).suffix.lower() not in SUPPORTED_FILES:
             raise AnalysisError(415, "unsupported_file", "지원하지 않는 파일 형식이에요. 문서·텍스트·PDF·이미지로 전송해 주세요.")
+        if Path(file.name).suffix.lower() == ".pdf":
+            if not file.content.startswith(b"%PDF-"):
+                raise AnalysisError(422, "invalid_pdf", "PDF를 읽을 수 없어요. 파일이 손상됐는지 확인해 주세요.")
+            try:
+                reader = PdfReader(BytesIO(file.content))
+                if reader.is_encrypted or not len(reader.pages):
+                    raise PdfReadError("unreadable PDF")
+            except (PdfReadError, ValueError, IndexError, KeyError):
+                raise AnalysisError(422, "invalid_pdf", "PDF를 읽을 수 없어요. 파일이 손상됐는지 확인해 주세요.") from None
 
 
 
