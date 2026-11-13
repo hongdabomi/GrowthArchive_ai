@@ -4,12 +4,14 @@ import asyncio
 import base64
 from copy import deepcopy
 import json
+from io import BytesIO
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 from pydantic import SecretStr, ValidationError
+from pypdf import PdfWriter
 
 from core.config import Settings, get_settings
 from core.errors import AnalysisError
@@ -75,6 +77,14 @@ def home_result(files=()):
                                     "confidence": "medium", "category": "동아리"},
                      "materialType": "회의록", "stage": None, "summary": "진행 방식을 논의했어요.",
                      "changes": [], "files": [{"id": f.id, "materialType": "회의록"} for f in files]}})
+
+
+def valid_pdf():
+    output = BytesIO()
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    writer.write(output)
+    return output.getvalue()
 
 
 def journey_context(single=False):
@@ -239,7 +249,7 @@ class AnalysisTests(unittest.IsolatedAsyncioTestCase):
     async def test_home_passes_message_link_text_image_and_document_to_model(self):
         files = [UploadedFile("text-1", "notes.txt", "text/plain", b"Written evidence"),
                  UploadedFile("image-1", "screen.png", "image/png", b"image-bytes"),
-                 UploadedFile("pdf-1", "report.pdf", "application/pdf", b"document-bytes")]
+                 UploadedFile("pdf-1", "report.pdf", "application/pdf", valid_pdf())]
         data = home_result(files).model_dump()
         data["analysis"]["changes"] = [{"before": "Draft", "after": "Revised",
             "category": "revision", "evidence": ["My own revision", "Linked source", "Written evidence"]}]
@@ -259,6 +269,27 @@ class AnalysisTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(base64.b64decode(image["image_url"].split(",", 1)[1]), files[1].content)
         self.assertEqual(base64.b64decode(document["file_data"].split(",", 1)[1]), files[2].content)
         self.assertEqual(result.analysis.changes[0].evidence, data["analysis"]["changes"][0]["evidence"])
+
+    async def test_home_preserves_explicit_metadata_and_comparison_facts(self):
+        original = ("활동 상태: 완료\n담당 역할: 백엔드 개발\n활동 기간: 2026-01~2026-02\n"
+                    "제가 작업 시간을 30분→8분으로 줄였어요.\n"
+                    "성장아카이브 자동화 경험을 봉사 활동에 적용했어요.")
+        file = UploadedFile("f1", "report.txt", "text/plain", original.encode())
+        with patch("home.structured_response", return_value=home_result([file])):
+            result = await analyze_home(message="자료를 정리해 주세요.", files=[file],
+                source_url=None, link_content=None, context=AnalysisContext(), config=self.settings)
+        for fact in original.splitlines():
+            self.assertIn(fact, result.analysis.summary)
+
+    async def test_corrupt_pdf_rejected_before_model_call(self):
+        for content in (b"not-a-pdf", b"%PDF-1.7\ntruncated"):
+            with self.subTest(content=content):
+                file = UploadedFile("f1", "broken.pdf", "application/pdf", content)
+                with patch("home.structured_response") as model, self.assertRaises(AnalysisError) as caught:
+                    await analyze_home(message="확인해 주세요.", files=[file], source_url=None,
+                        link_content=None, context=AnalysisContext(), config=self.settings)
+                self.assertEqual((caught.exception.status_code, caught.exception.code), (422, "invalid_pdf"))
+                model.assert_not_called()
 
     async def analyze(self, data, single=False):
         with patch("journey.structured_response", return_value=JourneyModel.model_validate(data)):
@@ -283,6 +314,15 @@ class AnalysisTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("evidenceId", json.dumps(result))
         self.assertNotIn("analysis", result["result"])
         self.assertNotIn("evidenceSources", result["result"])
+
+    async def test_journey_summary_only_describes_public_confirmed_events(self):
+        data = growth_result()
+        data["summary"]["title"] = "봉사에서 시간을 줄였어요"
+        data["summary"]["description"] = "봉사 시간을 줄인 개선을 확인했어요."
+        result = await self.analyze(data)
+        summary = result["result"]["summary"]
+        self.assertNotIn("봉사", summary["title"] + summary["description"])
+        self.assertEqual(summary["title"], result["result"]["events"][0]["title"])
 
     async def test_single_record_comparison_is_preserved(self):
         result = await self.analyze(growth_result(single=True), single=True)
