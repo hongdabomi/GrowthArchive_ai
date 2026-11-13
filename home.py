@@ -1,12 +1,32 @@
 #홈 챗봇, 활동 연결, 변화 감지
 
 from collections import Counter
+import re
 
 from core.errors import AnalysisError
 from llm_client import structured_response
 from prompts.home import HOME_PROMPT
 from documents import validate_files, build_parts
 from schemas.chat import HomeResponse, HomeModelInput
+
+
+KEY_FACT = re.compile(r"^(?:[-*#]\s*)*(?:활동 상태|담당 역할|활동 기간)\s*[:：]\s*\S")
+NUMBER_CHANGE = re.compile(r"\d+(?:[.,]\d+)?\s*(?:분|시간|초|건|개|회|명|%)?\s*(?:→|->)\s*\d")
+EXPERIENCE_USE = re.compile(r"(?:경험|지식|피드백).{0,100}(?:적용|활용)")
+
+
+def preserve_key_facts(summary, sources):
+    # 후속 분석에는 원본 파일이 전달되지 않으므로 명시적 사실을 기록 요약에 남긴다.
+    for source in sources:
+        for raw in source.splitlines():
+            line = raw.strip()
+            if (not 4 <= len(line) <= 300 or line in summary or
+                    not (KEY_FACT.search(line) or NUMBER_CHANGE.search(line) or EXPERIENCE_USE.search(line))):
+                continue
+            if len(summary) + len(line) + 1 > 20_000:
+                return summary
+            summary += "\n" + line
+    return summary
 
 
 async def analyze_home(*, message, files, source_url, link_content, context, config, active_activity_id=None, active_activity_pending=False, recent_messages=None):
@@ -52,6 +72,7 @@ async def analyze_home(*, message, files, source_url, link_content, context, con
                 continue
             if not any(quote in source for source in text_sources):
                 raise AnalysisError(502, "invalid_analysis", "분석 근거가 실제 입력·자료와 일치하지 않아요.")
+    result.summary = preserve_key_facts(result.summary, [message, *text_sources[2:]])
     return response
 
 
