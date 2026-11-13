@@ -20,9 +20,29 @@ async def analyze_journey(payload, config):
     model = await structured_response(config, instructions=JOURNEY_PROMPT,
                                       input=json.dumps(model_input, ensure_ascii=False), schema=JourneyModel)
     catalog = model_input["evidenceCatalog"]
-    summary = {**model.summary.model_dump(), "evidence": restore(model.summary.evidence, catalog)}
-    check_evidence(summary["evidence"], context["records"])
+    model_summary_evidence = restore(model.summary.evidence, catalog)
+    check_evidence(model_summary_evidence, context["records"])
     events, axes = build_growth(model.events, catalog, context["records"])
+    if events:
+        lines = [f'{event["activity"]["name"]}: {event["description"]}' for event in events]
+        description = ""
+        for line in lines:
+            if len(description) + len(line) + 1 > 2000:
+                break
+            description += (" " if description else "") + line
+        if any(item.status != "confirmed" for event in model.events for item in event.growthAssessments):
+            note = "일부 변화는 근거가 부족해 확인된 성장으로 표시하지 않았어요."
+            if len(description) + len(note) + 1 <= 2000:
+                description += " " + note
+        evidence = list({(ref["recordId"], ref["quote"]): ref
+                         for event in events for item in event["growthAssessments"]
+                         for ref in item["evidence"]}.values())[:20]
+        summary = {"title": events[0]["title"] if len(events) == 1 else f"확인된 성장 {len(events)}건",
+                   "description": description, "evidence": evidence}
+    else:
+        summary = {"title": "확인된 성장 근거가 부족해요",
+                   "description": "제공된 기록만으로는 성장을 확인하지 못했어요. 추가 근거가 필요해요.",
+                   "evidence": model_summary_evidence}
     if not events and model.badges:
         raise AnalysisError(502, "invalid_journey", "성장 이벤트 없이 배지만 반환됐어요.")
     badges = []
