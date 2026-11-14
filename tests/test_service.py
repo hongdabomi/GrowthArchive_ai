@@ -4,6 +4,7 @@ import asyncio
 import base64
 from copy import deepcopy
 import json
+import threading
 from io import BytesIO
 from types import SimpleNamespace
 import unittest
@@ -186,6 +187,17 @@ class PublicApiTests(unittest.TestCase):
             response = client.post("/api/chat", data={"message": "활동 기록"}, headers={"Prefer": "respond-sync"})
             self.assertEqual(response.json()["status"], "failed")
             self.assertNotIn("result", response.json())
+
+    def test_pdf_model_timeout_marks_job_failed_without_retry(self):
+        file = valid_pdf()
+        with self.client() as client, patch("jobs.analyze_home", side_effect=AnalysisError(
+                504, "openai_timeout", "분석 응답 시간이 초과됐어요.")) as model:
+            response = client.post("/api/chat", files={"files": ("report.pdf", file, "application/pdf")})
+            self.assertEqual(response.status_code, 202)
+            job = client.get("/api/chat/jobs/" + response.json()["jobId"]).json()
+        self.assertEqual((job["status"], job["code"]), ("failed", "openai_timeout"))
+        self.assertNotIn("result", job)
+        model.assert_awaited_once()
 
     def test_backend_snapshot_survives_ai_server_restart(self):
         result = HomeResponse(kind="general", content="보관된 결과", analysis=None, update=None)
@@ -386,6 +398,62 @@ class AnalysisTests(unittest.IsolatedAsyncioTestCase):
                 source_url=None, link_content=None, context=context, config=self.settings)
         self.assertEqual(result.analysis.summary, "진행 방식을 논의했어요.")
 
+    async def test_home_compares_only_same_activity_records_with_current_file(self):
+        previous = "회귀 검사 20개는 모두 성공했습니다."
+        current = "최종 회귀 검사 35개가 모두 통과했습니다."
+        file = UploadedFile("f1", "final.txt", "text/plain", current.encode())
+        context = AnalysisContext.model_validate({
+            "activities": [{"id": "a1", "name": "프로젝트"}, {"id": "a2", "name": "다른 프로젝트"}],
+            "records": [{"id": "r1", "activityId": "a1", "summary": previous},
+                        {"id": "r2", "activityId": "a2", "summary": "회귀 검사 99개를 확인했습니다."}],
+        })
+        data = home_result([file]).model_dump()
+        data["analysis"]["activity"].update(match="existing", id="a1", name="프로젝트")
+        data["analysis"]["changes"] = [{"before": "회귀 검사 20개", "after": "회귀 검사 35개",
+                                         "category": "검사 범위 확대", "evidence": [previous, "file:f1"]}]
+        with patch("home.structured_response", return_value=HomeResponse.model_validate(data)) as model:
+            result = await analyze_home(message="새 자료를 분석해 주세요.", files=[file],
+                source_url=None, link_content=None, context=context, config=self.settings)
+        parts = model.call_args.kwargs["input"][0]["content"]
+        self.assertIn(previous, parts[0]["text"])
+        self.assertIn(current, parts[1]["text"])
+        self.assertIn("같은 지표", model.call_args.kwargs["instructions"])
+        self.assertEqual(result.analysis.changes[0].before, "회귀 검사 20개")
+        self.assertEqual(result.analysis.changes[0].after, "회귀 검사 35개")
+
+    async def test_home_rejects_comparison_evidence_from_other_activity(self):
+        file = UploadedFile("f1", "final.txt", "text/plain", "최종 회귀 검사 35개가 모두 통과했습니다.".encode())
+        context = AnalysisContext.model_validate({
+            "activities": [{"id": "a1", "name": "프로젝트"}, {"id": "a2", "name": "다른 프로젝트"}],
+            "records": [{"id": "r2", "activityId": "a2", "summary": "회귀 검사 99개가 통과했습니다."}],
+        })
+        data = home_result([file]).model_dump()
+        data["analysis"]["activity"].update(match="existing", id="a1", name="프로젝트")
+        data["analysis"]["changes"] = [{"before": "회귀 검사 99개", "after": "회귀 검사 35개",
+                                         "category": "검사", "evidence": ["회귀 검사 99개가 통과했습니다.", "file:f1"]}]
+        with patch("home.structured_response", return_value=HomeResponse.model_validate(data)):
+            with self.assertRaises(AnalysisError) as caught:
+                await analyze_home(message="자료 분석", files=[file], source_url=None,
+                    link_content=None, context=context, config=self.settings)
+        self.assertEqual(caught.exception.code, "invalid_analysis")
+
+    async def test_pdf_validation_does_not_block_event_loop(self):
+        file = UploadedFile("f1", "report.pdf", "application/pdf", valid_pdf())
+        started, release = threading.Event(), threading.Event()
+        def slow_validation(_files):
+            started.set()
+            release.wait(2)
+        with patch("home.validate_files", side_effect=slow_validation), \
+             patch("home.structured_response", return_value=home_result([file])):
+            task = asyncio.create_task(analyze_home(message="자료 분석", files=[file],
+                source_url=None, link_content=None, context=AnalysisContext(), config=self.settings))
+            try:
+                await asyncio.wait_for(asyncio.to_thread(started.wait, 1), 1.5)
+                await asyncio.wait_for(asyncio.sleep(0.01), 0.2)
+            finally:
+                release.set()
+                await task
+
     async def test_corrupt_pdf_rejected_before_model_call(self):
         for content in (b"not-a-pdf", b"%PDF-1.7\ntruncated"):
             with self.subTest(content=content):
@@ -419,6 +487,43 @@ class AnalysisTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("evidenceId", json.dumps(result))
         self.assertNotIn("analysis", result["result"])
         self.assertNotIn("evidenceSources", result["result"])
+
+    async def test_journey_keeps_verified_time_pair_in_comparison_and_summary(self):
+        payload = journey_context(single=True).model_copy(deep=True)
+        quote = "봉사 활동에서 자동화를 적용해 작업 시간을 30분에서 8분으로 단축했습니다."
+        payload.records[0].summary = quote
+        data = growth_result(single=True)
+        item = data["events"][0]["growthAssessments"][0]
+        item["growthType"] = "efficiency_improvement"
+        item["comparison"].update(before="수작업", after="자동화", condition="같은 작업과 품질")
+        data["events"][0]["description"] = "봉사 작업을 자동화했어요"
+        with patch("journey.structured_response", return_value=JourneyModel.model_validate(data)):
+            result = await analyze_journey(payload, self.settings)
+        event = result["result"]["events"][0]
+        comparison = event["growthAssessments"][0]["comparison"]
+        self.assertIn("30분", comparison["before"])
+        self.assertIn("8분", comparison["after"])
+        self.assertIn("30분 → 8분", event["description"])
+        self.assertIn("30분 → 8분", result["result"]["summary"]["description"])
+        self.assertEqual(comparison["beforeEvidence"][0]["quote"], quote)
+
+    async def test_journey_does_not_add_numbers_without_explicit_pair(self):
+        result = await self.analyze(growth_result())
+        comparison = result["result"]["events"][0]["growthAssessments"][0]["comparison"]
+        self.assertEqual((comparison["before"], comparison["after"]), ("모델 학습", "API 구현"))
+
+    async def test_journey_does_not_choose_between_multiple_numeric_pairs(self):
+        payload = journey_context(single=True).model_copy(deep=True)
+        payload.records[0].summary = "작업 시간은 30분에서 8분, 검사 시간은 20분에서 5분으로 줄었습니다."
+        data = growth_result(single=True)
+        item = data["events"][0]["growthAssessments"][0]
+        item["growthType"] = "efficiency_improvement"
+        item["comparison"].update(before="이전", after="이후")
+        with patch("journey.structured_response", return_value=JourneyModel.model_validate(data)):
+            result = await analyze_journey(payload, self.settings)
+        comparison = result["result"]["events"][0]["growthAssessments"][0]["comparison"]
+        self.assertEqual((comparison["before"], comparison["after"]), ("이전", "이후"))
+        self.assertNotIn("→", result["result"]["summary"]["description"])
 
     async def test_journey_catalog_input_is_stable_when_record_order_changes(self):
         context = journey_context().model_dump()
