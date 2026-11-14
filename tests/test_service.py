@@ -280,6 +280,65 @@ class AnalysisTests(unittest.IsolatedAsyncioTestCase):
                 source_url=None, link_content=None, context=AnalysisContext(), config=self.settings)
         for fact in original.splitlines():
             self.assertIn(fact, result.analysis.summary)
+        self.assertTrue(result.analysis.summary.startswith("진행 방식을 논의했어요."))
+
+    async def test_home_keeps_prose_comparison_and_transfer_in_markdown(self):
+        original = ("# 봉사 활동\n활동 상태: 완료\n담당 역할: 자료 정리\n"
+                    "활동 기간: 2026.10.20 ~ 2026.11.10\n"
+                    "성장아카이브에서 익힌 자동화 경험을 봉사 활동에 적용했다.\n"
+                    "작업 시간을 30분에서 8분으로 단축했다.")
+        file = UploadedFile("f1", "activity.md", "text/markdown", original.encode())
+        with patch("home.structured_response", return_value=home_result([file])):
+            result = await analyze_home(message="자료를 분석해 주세요.", files=[file],
+                source_url=None, link_content=None, context=AnalysisContext(), config=self.settings)
+        summary = result.analysis.summary
+        for fact in original.splitlines()[1:]:
+            self.assertIn(fact, summary)
+        self.assertEqual(result.analysis.materialType, "회의록")
+        self.assertEqual(result.analysis.changes, [])
+
+    async def test_home_keeps_measurement_condition_baseline_and_learned_skill(self):
+        original = ("같은 개발 서버, 동일한 1000개 기록, 동일한 검색어 집합으로 10회 측정했습니다.\n"
+                    "자료 검색 API의 평균 응답 시간은 1200ms였습니다.\n"
+                    "검색 API 평균 응답 시간은 개선 전 1200ms에서 개선 후 320ms로 줄었습니다.\n"
+                    "저는 쿼리 실행 계획을 처음 읽고 비교하는 방법을 익혔습니다.")
+        file = UploadedFile("f1", "measurements.md", "text/markdown", original.encode())
+        with patch("home.structured_response", return_value=home_result([file])):
+            result = await analyze_home(message="자료를 분석해 주세요.", files=[file],
+                source_url=None, link_content=None, context=AnalysisContext(), config=self.settings)
+        for fact in original.splitlines():
+            self.assertIn(fact, result.analysis.summary)
+
+    async def test_home_does_not_add_task_completion_or_other_person_role(self):
+        original = ("API 테스트 작업 상태: 완료\n팀원 김철수의 담당 역할: 설계\n"
+                    "회의에서 다음 주 개선안을 논의했습니다.")
+        file = UploadedFile("f1", "notes.txt", "text/plain", original.encode())
+        with patch("home.structured_response", return_value=home_result([file])):
+            result = await analyze_home(message="자료를 정리해 주세요.", files=[file],
+                source_url=None, link_content=None, context=AnalysisContext(), config=self.settings)
+        self.assertEqual(result.analysis.summary, "진행 방식을 논의했어요.")
+
+    async def test_home_does_not_append_html_markup_to_summary(self):
+        file = UploadedFile("f1", "worklog.html", "text/html",
+            b"<html><p>Average response time was 1200ms to 320ms.</p></html>")
+        with patch("home.structured_response", return_value=home_result([file])):
+            result = await analyze_home(message="자료를 정리해 주세요.", files=[file],
+                source_url=None, link_content=None, context=AnalysisContext(), config=self.settings)
+        self.assertEqual(result.analysis.summary, "진행 방식을 논의했어요.")
+
+    async def test_home_does_not_copy_previous_record_facts_into_new_summary(self):
+        context = AnalysisContext.model_validate({
+            "activities": [{"id": "a1", "name": "독서 모임", "category": "동아리"}],
+            "records": [{"id": "r1", "activityId": "a1", "message": None,
+                         "summary": "활동 상태: 완료"}],
+        })
+        response = home_result()
+        response.analysis.activity.match = "existing"
+        response.analysis.activity.id = "a1"
+        with patch("home.structured_response", return_value=response):
+            result = await analyze_home(message="이번 주 회의를 정리했어요.", files=[],
+                source_url=None, link_content=None, context=context, config=self.settings)
+        self.assertEqual(result.analysis.summary, "진행 방식을 논의했어요.")
 
     async def test_corrupt_pdf_rejected_before_model_call(self):
         for content in (b"not-a-pdf", b"%PDF-1.7\ntruncated"):

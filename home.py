@@ -10,23 +10,37 @@ from documents import validate_files, build_parts
 from schemas.chat import HomeResponse, HomeModelInput
 
 
-KEY_FACT = re.compile(r"^(?:[-*#]\s*)*(?:활동 상태|담당 역할|활동 기간)\s*[:：]\s*\S")
-NUMBER_CHANGE = re.compile(r"\d+(?:[.,]\d+)?\s*(?:분|시간|초|건|개|회|명|%)?\s*(?:→|->)\s*\d")
-EXPERIENCE_USE = re.compile(r"(?:경험|지식|피드백).{0,100}(?:적용|활용)")
+KEY_FACT = re.compile(r"^(?:[-*#]\s*)*(?:활동 상태|담당 역할|활동 기간|활동 시작일|활동 종료일)\s*[:：]\s*\S")
+NUMBER_CHANGE = re.compile(r"\d+(?:[.,]\d+)?\s*(?:분|시간|초|건|개|회|명|%|점)?\s*(?:→|->|에서|부터)\s*\d")
+EXPERIENCE_USE = re.compile(r"(?:경험|지식|노하우|방법|피드백).{0,100}(?:적용|활용|옮겨)")
+MEASURED_RESULT = re.compile(r"(?:평균|정확도|회귀 검사|처리 시간|소요 시간|작업 건수).{0,180}\d")
+COMPARISON_CONDITION = re.compile(r"(?:같은|동일한).{0,160}\d+.{0,80}(?:측정|평가)")
+LEARNED_EXPERIENCE = re.compile(r"(?:처음.{0,100}(?:구현|작성|익혔)|경험.{0,100}쌓)")
 
 
 def preserve_key_facts(summary, sources):
-    # 후속 분석에는 원본 파일이 전달되지 않으므로 명시적 사실을 기록 요약에 남긴다.
+    # 후속 분석에는 원본 파일이 전달되지 않으므로 빠진 원문 구절만 요약에 남긴다.
+    facts = []
     for source in sources:
         for raw in source.splitlines():
-            line = raw.strip()
-            if (not 4 <= len(line) <= 300 or line in summary or
-                    not (KEY_FACT.search(line) or NUMBER_CHANGE.search(line) or EXPERIENCE_USE.search(line))):
-                continue
-            if len(summary) + len(line) + 1 > 20_000:
-                return summary
-            summary += "\n" + line
-    return summary
+            for sentence in re.split(r"(?<=[.!?])\s+", raw):
+                fact = sentence.strip().strip("-*# ")
+                if (not 4 <= len(fact) <= 300 or fact in summary or fact in facts or
+                        not (KEY_FACT.search(fact) or NUMBER_CHANGE.search(fact) or
+                             EXPERIENCE_USE.search(fact) or MEASURED_RESULT.search(fact) or
+                             COMPARISON_CONDITION.search(fact) or LEARNED_EXPERIENCE.search(fact))):
+                    continue
+                facts.append(fact)
+                if len(facts) == 12:
+                    break
+            if len(facts) == 12:
+                break
+        if len(facts) == 12:
+            break
+    if not facts:
+        return summary
+    supplement = " 자료에는 " + ", ".join(f"‘{fact}’" for fact in facts) + "라고 명시돼 있어요."
+    return summary + supplement if len(summary) + len(supplement) <= 20_000 else summary
 
 
 async def analyze_home(*, message, files, source_url, link_content, context, config, active_activity_id=None, active_activity_pending=False, recent_messages=None):
@@ -36,6 +50,8 @@ async def analyze_home(*, message, files, source_url, link_content, context, con
                              linkContent=link_content, context=context, activeActivityId=active_activity_id,
                              activeActivityPending=active_activity_pending, recentMessages=recent_messages or [])
     parts, text_sources = build_parts(payload, files)
+    current_sources = [message, *(file.content.decode("utf-8-sig") for file in files
+                                  if file.name.lower().endswith((".txt", ".md")))]
     response = await structured_response(config, instructions=HOME_PROMPT,
                                          input=[{"role": "user", "content": parts}], schema=HomeResponse)
     if response.kind in {"general", "activity-update"}:
@@ -72,7 +88,7 @@ async def analyze_home(*, message, files, source_url, link_content, context, con
                 continue
             if not any(quote in source for source in text_sources):
                 raise AnalysisError(502, "invalid_analysis", "분석 근거가 실제 입력·자료와 일치하지 않아요.")
-    result.summary = preserve_key_facts(result.summary, [message, *text_sources[2:]])
+    result.summary = preserve_key_facts(result.summary, current_sources)
     return response
 
 
