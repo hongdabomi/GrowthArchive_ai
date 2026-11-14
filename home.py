@@ -48,7 +48,7 @@ def find_source_quote(quote, sources):
         if quote in source:
             return quote
     # 줄바꿈·연속 공백만 다른 인용은 원문에 있는 실제 구절로 되돌린다.
-    if not 12 <= len(quote) <= 500 or len(quote.split()) < 2:
+    if len(quote.split()) < 2:
         return None
     pattern = r"\s+".join(re.escape(part) for part in quote.split())
     for source in sources:

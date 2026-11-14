@@ -282,6 +282,29 @@ class AnalysisTests(unittest.IsolatedAsyncioTestCase):
                 source_url=None, link_content=None, context=AnalysisContext(), config=self.settings)
         self.assertEqual(result.analysis.changes[0].evidence, [source])
 
+    async def test_home_restores_short_and_long_quotes_with_whitespace_only_changes(self):
+        source = "자료 식별자: SAMPLE\n검사 20개를 확인했습니다.\n" + "이전 결과와 같은 조건에서 다시 측정했습니다.\n" * 30
+        file = UploadedFile("f1", "활동보고서.txt", "text/plain", source.encode())
+        short = "검사 20개"
+        long = source[:750]
+        self.assertIn(short, source)
+        self.assertGreater(len(long), 500)
+        for original in (short, long):
+            quote = original.replace(" ", "\n", 1) if original == short else original.replace("\n", " ")
+            data = home_result([file]).model_dump()
+            data["analysis"]["changes"] = [{"before": "검색 조건 미적용", "after": "인덱스 적용",
+                "category": "성능 개선", "evidence": [quote]}]
+            with self.subTest(length=len(quote)), patch("home.structured_response", return_value=HomeResponse.model_validate(data)):
+                result = await analyze_home(message="자료를 분석해 주세요.", files=[file],
+                    source_url=None, link_content=None, context=AnalysisContext(), config=self.settings)
+            self.assertEqual(result.analysis.changes[0].evidence, [original])
+        data["analysis"]["changes"][0]["evidence"] = [long.replace("20개", "50개").replace("\n", " ")]
+        with patch("home.structured_response", return_value=HomeResponse.model_validate(data)):
+            with self.assertRaises(AnalysisError) as caught:
+                await analyze_home(message="자료를 분석해 주세요.", files=[file],
+                    source_url=None, link_content=None, context=AnalysisContext(), config=self.settings)
+        self.assertEqual(caught.exception.code, "invalid_analysis")
+
     async def test_home_still_rejects_quote_absent_from_source(self):
         file = UploadedFile("f1", "활동보고서.txt", "text/plain", "검색 응답이 1200ms에서 320ms로 줄었습니다.".encode())
         data = home_result([file]).model_dump()
