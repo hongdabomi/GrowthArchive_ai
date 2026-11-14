@@ -75,6 +75,15 @@ class HomeResponse(StrictModel):
         return self
 
 
+class SingleFileAnalysis(TextAnalysis):
+    activity: HomeActivityDecision
+    fileMaterialType: Text
+
+
+class SingleFileResponse(HomeResponse):
+    analysis: SingleFileAnalysis | None
+
+
 class ConversationMessage(StrictModel):
     role: Literal["user", "assistant"]
     content: str

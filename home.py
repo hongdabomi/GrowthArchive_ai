@@ -8,7 +8,7 @@ from core.errors import AnalysisError
 from llm_client import structured_response
 from prompts.home import HOME_PROMPT
 from documents import validate_files, build_parts
-from schemas.chat import HomeResponse, HomeModelInput
+from schemas.chat import HomeResponse, HomeModelInput, SingleFileResponse
 
 
 KEY_FACT = re.compile(r"^(?:[-*#]\s*)*(?:활동 상태|담당 역할|활동 기간|활동 시작일|활동 종료일)\s*[:：]\s*\S")
@@ -68,8 +68,20 @@ async def analyze_home(*, message, files, source_url, link_content, context, con
     parts, text_sources = build_parts(payload, files)
     current_sources = [message, *(file.content.decode("utf-8-sig") for file in files
                                   if file.name.lower().endswith((".txt", ".md")))]
-    response = await structured_response(config, instructions=HOME_PROMPT,
-                                         input=[{"role": "user", "content": parts}], schema=HomeResponse)
+    single_file = len(files) == 1
+    instructions = HOME_PROMPT
+    if single_file:
+        instructions += ("\n# 단일 파일 출력\n"
+                         "analysis.files 대신 analysis.fileMaterialType에 현재 첨부의 자료 유형을 적는다. "
+                         "파일 ID는 서버가 실제 첨부에서 넣으므로 출력하지 않는다.\n")
+    response = await structured_response(config, instructions=instructions,
+                                         input=[{"role": "user", "content": parts}],
+                                         schema=SingleFileResponse if single_file else HomeResponse)
+    if single_file and isinstance(response, SingleFileResponse) and response.kind == "analysis":
+        data = response.model_dump()
+        data["analysis"]["files"] = [{"id": files[0].id,
+                                       "materialType": data["analysis"].pop("fileMaterialType")}]
+        response = HomeResponse.model_validate(data)
     if response.kind in {"general", "activity-update"}:
         # 첨부 자료를 일반 대화로 무시하지 않고 분석 응답을 요구한다.
         if files or source_url:

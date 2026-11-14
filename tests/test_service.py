@@ -20,7 +20,7 @@ from backend_client import BackendClient
 from llm_client import structured_response
 from main import create_app
 from documents import encoded_files
-from schemas.chat import HomeResponse, UploadedFile
+from schemas.chat import HomeResponse, SingleFileResponse, UploadedFile
 from schemas.activity import ActivityRequest, ActivityMetadata
 from schemas.journey import JourneyContext, JourneyModel
 from activity_metadata import analyze_activity
@@ -258,6 +258,24 @@ class PublicApiTests(unittest.TestCase):
 class AnalysisTests(unittest.IsolatedAsyncioTestCase):
     settings = Settings(openai_api_key=SecretStr("test-key"))
 
+    async def test_single_file_id_comes_from_uploaded_file_not_model(self):
+        file = UploadedFile("current-b", "research.md", "text/markdown",
+                            "저는 영상분류 정확도를 72%에서 81%로 개선했습니다.".encode())
+        data = home_result([file]).model_dump()
+        data["analysis"]["fileMaterialType"] = "연구 기록"
+        data["analysis"].pop("files")
+        data["analysis"]["changes"] = [{"before": "정확도 72%", "after": "정확도 81%",
+                                          "category": "성과 향상", "evidence": ["file:current-b"]}]
+        with patch("home.structured_response", return_value=SingleFileResponse.model_validate(data)) as model:
+            result = await analyze_home(message="현재 자료를 분석해 주세요.", files=[file],
+                source_url=None, link_content=None, context=AnalysisContext(), config=self.settings)
+        self.assertIs(model.call_args.kwargs["schema"], SingleFileResponse)
+        self.assertEqual(result.analysis.files[0].id, "current-b")
+        self.assertEqual(result.analysis.files[0].materialType, "연구 기록")
+        self.assertEqual(result.analysis.changes[0].evidence, ["file:current-b"])
+        with self.assertRaises(ValidationError):
+            SingleFileResponse.model_validate(home_result([file]).model_dump())
+
     async def test_home_passes_message_link_text_image_and_document_to_model(self):
         files = [UploadedFile("text-1", "notes.txt", "text/plain", b"Written evidence"),
                  UploadedFile("image-1", "screen.png", "image/png", b"image-bytes"),
@@ -271,6 +289,7 @@ class AnalysisTests(unittest.IsolatedAsyncioTestCase):
                 source_url="https://example.com/report", link_content="Linked source",
                 context=AnalysisContext(), config=self.settings)
         model.assert_awaited_once()
+        self.assertIs(model.call_args.kwargs["schema"], HomeResponse)
         parts = model.call_args.kwargs["input"][0]["content"]
         payload = json.loads(parts[0]["text"])
         self.assertEqual(payload["message"], "My own revision")
