@@ -3,6 +3,8 @@
 from urllib.parse import quote, urlsplit
 
 import httpx
+from typing import Literal
+
 from pydantic import Field, ValidationError, model_validator
 
 from core.errors import AnalysisError
@@ -38,6 +40,24 @@ class HomeContext(StrictModel):
         return self
 
 
+class DuplicateMatch(StrictModel):
+    activityId: Identifier
+    recordId: Identifier
+    fileId: Identifier
+
+
+class DuplicateFile(StrictModel):
+    inputIndex: int = Field(ge=0, le=9)
+    status: Literal["new", "duplicate", "pending"]
+    matches: list[DuplicateMatch] = Field(max_length=20)
+
+
+class DuplicateCheck(StrictModel):
+    schemaVersion: Literal["file-dedup-v1"]
+    activityId: Identifier | None
+    files: list[DuplicateFile] = Field(min_length=1, max_length=10)
+
+
 class BackendClient:
     def __init__(self, settings):
         self.settings = settings
@@ -55,6 +75,12 @@ class BackendClient:
                 response = await client.request(method, s.backend_internal_base_url + path,
                     headers={"Authorization": "Bearer " + s.internal_service_token.get_secret_value()}, **kwargs)
             if response.status_code >= 300:
+                if path == "/internal/file-duplicates/check" and response.status_code == 422:
+                    try:
+                        if response.json().get("code") == "duplicate_lookup_limit":
+                            raise AnalysisError(422, "duplicate_lookup_limit", "파일 중복 조회 한도를 초과했어요.")
+                    except (ValueError, AttributeError):
+                        pass
                 status = response.status_code if response.status_code in {400, 401, 403, 404, 409, 422} else 503
                 raise AnalysisError(status, "backend_request_failed", "백엔드 내부 요청을 완료하지 못했어요.")
             return response.json()
@@ -68,11 +94,36 @@ class BackendClient:
         except ValidationError:
             raise AnalysisError(502, "backend_context_invalid", "백엔드 분석 문맥이 계약과 다릅니다.") from None
 
+    async def check_file_duplicates(self, activity_id, files):
+        try:
+            data = await self.request("POST", "/internal/file-duplicates/check", json={
+                "schemaVersion": "file-dedup-v1", "activityId": activity_id, "files": files})
+            result = DuplicateCheck.model_validate(data)
+        except AnalysisError as error:
+            if error.code == "duplicate_lookup_limit":
+                raise
+            raise AnalysisError(503, "duplicate_lookup_unavailable", "파일 중복 조회를 완료하지 못했어요.") from None
+        except ValidationError:
+            raise AnalysisError(503, "duplicate_lookup_unavailable", "파일 중복 조회를 완료하지 못했어요.") from None
+        if result.activityId != activity_id or [f.inputIndex for f in result.files] != list(range(len(files))):
+            raise AnalysisError(503, "duplicate_lookup_unavailable", "파일 중복 조회 결과가 일치하지 않아요.")
+        for item in result.files:
+            matches = [match.model_dump() for match in item.matches]
+            if ((activity_id is None) != (item.status == "pending")
+                    or (item.status == "new" and matches)
+                    or (item.status == "duplicate" and (not matches or any(m["activityId"] != activity_id for m in matches)))
+                    or matches != sorted(matches, key=lambda m: (m["activityId"], m["recordId"], m["fileId"]))):
+                raise AnalysisError(503, "duplicate_lookup_unavailable", "파일 중복 조회 결과가 올바르지 않아요.")
+        return result
+
     async def publish(self, job):
         body = {k: v for k, v in job.items() if k != "revision"}
         body["expectedRevision"] = job.get("revision", 0)
         data = await self.request("PUT", "/internal/chat-jobs/" + quote(job["jobId"], safe=""), json=body)
-        return self.snapshot(data, job)
+        saved = self.snapshot(data, job)
+        if job["status"] == "completed" and job.get("reply", {}).get("deduplication") != (saved.get("reply") or {}).get("deduplication"):
+            raise AnalysisError(503, "duplicate_contract_unsupported", "백엔드가 파일 중복 판정 결과를 보존하지 않았어요.")
+        return saved
 
     async def canonical(self, job_id):
         data = await self.request("GET", "/internal/chat-jobs/" + quote(job_id, safe=""))

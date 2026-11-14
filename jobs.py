@@ -12,6 +12,27 @@ from home import analyze_home, build_reply
 from links import fetch_link, validate_url
 
 
+async def check_duplicates(backend, result, files):
+    activity = result.analysis.activity if result.kind == "analysis" else None
+    activity_id = activity.id if activity and activity.match == "existing" else None
+    entries = [{"inputIndex": index, "sha256": hashlib.sha256(file.content).hexdigest(),
+                "size": len(file.content)} for index, file in enumerate(files)]
+    checked = await backend.check_file_duplicates(activity_id, entries)
+    seen = {}
+    items = []
+    for entry, verdict in zip(entries, checked.files):
+        item = verdict.model_dump()
+        key = (entry["sha256"], entry["size"])
+        if key in seen:
+            item.update(status="duplicate", matches=[], duplicateOfInputIndex=seen[key])
+        else:
+            seen[key] = entry["inputIndex"]
+        items.append(item)
+    blocked = any(item["status"] == "duplicate" for item in items)
+    return {"schemaVersion": "file-dedup-v1", "activityId": activity_id,
+            "files": items, "saveBlocked": blocked}
+
+
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
@@ -57,18 +78,28 @@ class JobService:
                 link = await fetch_link(job["sourceUrl"]) if job["sourceUrl"] else None
                 job["phase"] = "analyzing"
                 job = await self.publish(job)
-                result = await analyze_home(message=job["message"], files=decoded_files(job["files"]),
+                files = decoded_files(job["files"])
+                result = await analyze_home(message=job["message"], files=files,
                     source_url=job["sourceUrl"], link_content=link, context=context.context, config=self.settings,
                     active_activity_id=context.activeActivityId, active_activity_pending=context.activeActivityPending,
                     recent_messages=context.recentMessages)
+                dedup = await check_duplicates(self.backend, result, files) if self.settings.file_dedup_enabled and files else None
+                if dedup and dedup["saveBlocked"] and result.kind == "analysis":
+                    result.analysis.changes = []
                 job["phase"] = "persisting"
                 job = await self.publish(job)
                 job.update(status="completed", phase="completed",
-                           reply=build_reply(result, decoded_files(job["files"]), job["sourceUrl"], "reply-" + job["analysisId"]))
+                           reply=build_reply(result, files, job["sourceUrl"], "reply-" + job["analysisId"]))
+                if dedup:
+                    job["reply"]["deduplication"] = dedup
+                    if dedup["saveBlocked"]:
+                        job["reply"]["content"] = "중복 파일이 있어 저장할 수 없어요. 중복 파일을 제외하고 다시 보내 주세요. 함께 입력한 텍스트도 다시 보내 주세요."
+                        if job["reply"].get("analysis"):
+                            job["reply"]["analysis"]["noChangeMessage"] = "중복 파일이 있어 저장이 차단됐어요."
                 await self.publish(job)
         except Exception as error:
             failure = error if isinstance(error, AnalysisError) else AnalysisError(500, "analysis_failed", "분석 처리를 완료하지 못했어요.")
-            job.update(status="failed", error={"code": failure.code, "error": failure.message}, updatedAt=now())
+            job.update(status="failed", reply=None, error={"code": failure.code, "error": failure.message}, updatedAt=now())
             try:
                 await self.publish(job)
             except AnalysisError:
