@@ -19,6 +19,8 @@ class Settings:
     backend_internal_base_url: str = ""
     internal_service_token: SecretStr | None = field(default=None, repr=False)
     cors_origins: tuple[str, ...] = ("http://localhost:5173", "http://127.0.0.1:5173")
+    exclude_file_v2_enabled: bool = False
+    file_dedup_enabled: bool = False
 
     def __post_init__(self):
         if not 1 <= self.openai_timeout_seconds <= 120:
@@ -42,6 +44,9 @@ def get_settings():
     def secret(name):
         return SecretStr(value(name)) if value(name) else None
 
+    def enabled(name):
+        return value(name, "false").lower() == "true"
+
     return Settings(
         openai_api_key=secret("OPENAI_API_KEY"),
         openai_model=value("OPENAI_MODEL", "gpt-5.4-mini"),
@@ -49,4 +54,6 @@ def get_settings():
         backend_internal_base_url=value("BACKEND_INTERNAL_BASE_URL").rstrip("/"),
         internal_service_token=secret("INTERNAL_SERVICE_TOKEN"),
         cors_origins=tuple(s.strip() for s in value("AI_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if s.strip()),
+        exclude_file_v2_enabled=enabled("AI_EXCLUDE_FILE_V2_ENABLED"),
+        file_dedup_enabled=enabled("AI_FILE_DEDUP_ENABLED"),
     )
