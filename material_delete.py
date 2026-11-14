@@ -1,12 +1,15 @@
 """남은 원본만 재분석한다. 삭제·최종 저장은 백엔드가 수행한다."""
 
+import asyncio
+from io import BytesIO
 from pathlib import Path
 from typing import Literal
 
+from pypdf import PdfReader
 from pydantic import Field, model_validator
 from schemas.common import StrictModel, ActivityContext, Identifier, Text, AnalysisContext, Change
 from schemas.chat import HomeResponse, HomeModelInput, HomeAnalysis
-from documents import decoded_files, validate_files, build_parts, TEXT_FILES
+from documents import decoded_files, validate_files, TEXT_FILES
 from home import analyze_home, build_reply
 from llm_client import structured_response
 from prompts.home import HOME_PROMPT
@@ -65,26 +68,46 @@ def normalized(text):
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-async def analyze_remaining_current(payload, config, files):
-    sources = {}
-    for file in files:
-        if Path(file.name).suffix.lower() not in TEXT_FILES:
-            raise AnalysisError(422, "source_unreadable", "남은 원본을 읽을 수 없어요.")
+def source_text(file):
+    suffix = Path(file.name).suffix.lower()
+    if suffix == ".pdf":
         try:
-            sources[file.id] = normalized(file.content.decode("utf-8-sig"))
+            pages = [page.extract_text() for page in PdfReader(BytesIO(file.content)).pages]
+        except Exception:
+            raise AnalysisError(422, "source_unreadable", "남은 원본을 읽을 수 없어요.") from None
+        # 글자를 읽을 수 없는 페이지는 이미지 근거가 빠질 수 있으므로 분석을 중단한다.
+        if not pages or any(not page or not page.strip() for page in pages):
+            raise AnalysisError(422, "source_unreadable", "남은 원본을 읽을 수 없어요.")
+        text = "\n".join(pages)
+    elif suffix in TEXT_FILES:
+        try:
+            text = file.content.decode("utf-8-sig")
         except UnicodeDecodeError:
             raise AnalysisError(422, "source_unreadable", "남은 원본을 읽을 수 없어요.") from None
+    else:
+        raise AnalysisError(422, "source_unreadable", "남은 원본을 읽을 수 없어요.")
+    text = normalized(text)
+    if not text.strip() or len(text) > 100_000:
+        raise AnalysisError(422, "source_unreadable", "남은 원본을 읽을 수 없어요.")
+    return text
+
+
+async def analyze_remaining_current(payload, config, files):
+    sources = {file.id: await asyncio.to_thread(source_text, file) for file in files}
     activity = ActivityContext(id=payload.activity.id, name=payload.activity.name, category=payload.activity.category)
     model_input = HomeModelInput(message="남은 원본만 분석", files=[{"id": f.id, "name": f.name} for f in files],
         context=AnalysisContext(activities=[activity], records=[]), activeActivityId=activity.id)
     try:
-        parts, _ = build_parts(model_input, files)
+        parts = [{"type": "input_text", "text": model_input.model_dump_json()}]
+        parts.extend({"type": "input_text", "text": f"file:{file.id}\n파일명: {file.name}\n본문:\n{sources[file.id]}"}
+                     for file in files)
         result = await structured_response(config, instructions=HOME_PROMPT + """
 
 # 부분 파일 삭제 후 재분석
 남은 원본만으로 이번 기록의 요약과 실제 전후 변화를 새로 분석한다. 기존 결과나 삭제 파일은 입력에 없다.
 kind=analysis, update=null로 반환한다. 각 changes 항목마다 동일한 changeIndex의 changeEvidence를 정확히 하나 반환한다.
 before와 after에는 각각 해당 주장을 뒷받침하는 남은 파일 ID와 원문 연속 인용을 1개 이상 넣는다.
+PDF는 서버가 추출한 본문 텍스트만 근거로 사용한다. 그림·이미지 속 내용은 근거로 사용하지 않는다.
 원문의 줄바꿈만 정규화할 수 있다. 원문에 비교 근거가 없으면 changes=[]와 changeEvidence=[]를 반환한다.
 """, input=[{"role": "user", "content": parts}], schema=RemainingAnalysis)
     except AnalysisError as error:
@@ -115,7 +138,7 @@ async def analyze_remaining(payload, config):
         raise AnalysisError(422, "unsupported_schema_version", "지원하지 않는 재분석 계약 버전이에요.")
     try:
         files = decoded_files([f.model_dump(exclude={"schemaVersion"}) for f in payload.files])
-        validate_files(files)
+        await asyncio.to_thread(validate_files, files)
     except AnalysisError as error:
         if config.exclude_file_v2_enabled:
             raise AnalysisError(422, "source_unreadable", "남은 원본을 읽을 수 없어요.") from None

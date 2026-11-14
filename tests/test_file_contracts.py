@@ -35,6 +35,28 @@ def model_result(files, evidence=None):
     return RemainingAnalysis.model_validate(data)
 
 
+def text_pdf(text):
+    stream = b"BT /F1 12 Tf 72 720 Td (" + text.encode("ascii") + b") Tj ET" if text else b""
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    output = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for index, obj in enumerate(objects, 1):
+        offsets.append(len(output))
+        output.extend(f"{index} 0 obj\n".encode() + obj + b"\nendobj\n")
+    xref = len(output)
+    output.extend(f"xref\n0 {len(offsets)}\n0000000000 65535 f \n".encode())
+    for offset in offsets[1:]:
+        output.extend(f"{offset:010d} 00000 n \n".encode())
+    output.extend(f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode())
+    return bytes(output)
+
+
 class FileContractTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.settings = Settings(openai_api_key=SecretStr("test"), exclude_file_v2_enabled=True,
@@ -59,6 +81,39 @@ class FileContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output["fileIds"], ["b", "c"])
         self.assertEqual(output["reply"]["analysis"]["changes"][0]["evidence"], ["B.txt", "C.md"])
         self.assertEqual(output["changeEvidence"], evidence)
+
+    async def test_remaining_text_pdf_keeps_verified_change(self):
+        files = [UploadedFile("b", "B.pdf", "application/pdf", text_pdf("before: 30")),
+                 UploadedFile("c", "C.txt", "text/plain", b"after: 8\n")]
+        evidence = [{"changeIndex": 0, "before": [{"fileId": "b", "quote": "before: 30"}],
+                     "after": [{"fileId": "c", "quote": "after: 8"}]}]
+        async def respond(*args, **kwargs):
+            parts = kwargs["input"][0]["content"]
+            self.assertTrue(all(part["type"] == "input_text" for part in parts))
+            self.assertIn("file:b\n", parts[1]["text"])
+            self.assertIn("before: 30", parts[1]["text"])
+            self.assertNotIn("private", str(parts))
+            return model_result(files, evidence)
+        with patch("material_delete.structured_response", side_effect=respond):
+            output = await analyze_remaining(request(files), self.settings)
+        self.assertEqual(output["fileIds"], ["b", "c"])
+        self.assertEqual(output["changeEvidence"], evidence)
+        self.assertEqual(output["reply"]["analysis"]["changes"][0]["evidence"], ["B.pdf", "C.txt"])
+
+    async def test_remaining_pdf_missing_quote_or_unreadable_page_fails(self):
+        file = UploadedFile("b", "B.pdf", "application/pdf", text_pdf("before: 30"))
+        evidence = [{"changeIndex": 0, "before": [{"fileId": "b", "quote": "before: 99"}],
+                     "after": [{"fileId": "b", "quote": "before: 30"}]}]
+        with patch("material_delete.structured_response", return_value=model_result([file], evidence)):
+            with self.assertRaises(AnalysisError) as caught:
+                await analyze_remaining(request([file]), self.settings)
+        self.assertEqual(caught.exception.code, "analysis_failed")
+        blank = UploadedFile("b", "scan.pdf", "application/pdf", text_pdf(""))
+        with patch("material_delete.structured_response") as model:
+            with self.assertRaises(AnalysisError) as caught:
+                await analyze_remaining(request([blank]), self.settings)
+        self.assertEqual(caught.exception.code, "source_unreadable")
+        model.assert_not_called()
 
     async def test_remaining_allows_100_changes_only_in_exclude_contract(self):
         file = UploadedFile("b", "B.txt", "text/plain", b"before: 30\nafter: 8")
