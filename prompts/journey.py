@@ -36,6 +36,7 @@ checks는 근거에서 확인한 조건만 true다. 모르면 false다. 확인 �
 첫 자료에 비교 가능한 전후 사실이 없으면 요약하고 판단을 보류한다. 과거 미수행을 추측하지 않는다.
 한 문서에 실제 전후·개인 수행이 명시되면 동일 recordId 근거 둘로도 판단할 수 있다.
 성과 향상·효율성 향상 확인에는 comparison의 before, after, condition과 양쪽 역할별 근거가 필요하다. 같은 인용문이 양쪽을 모두 뒷받침하면 같은 evidenceId를 사용할 수 있다.
+근거에 같은 지표의 전후 수치와 단위가 명시되어 있으면 comparison.before와 after에 각각 정확한 수치·단위를 포함한다. 예를 들어 근거가 '작업 시간 30분에서 8분으로 단축'이면 before에는 30분, after에는 8분을 남긴다. 서로 다른 지표나 측정 조건의 수치는 연결하지 않고, 근거에 없는 수치는 만들지 않는다.
 능력 확장·경험 축적은 비교 객체가 없어도 새 수행 사실이 분명하면 확인할 수 있다.
 경험 전이에는 transfer의 sourceActivity, experience, targetActivityId, application과 출발·적용 근거가 필요하다. 출발 활동이 등록되지 않았어도 원문에 별개 활동과 실제 연결이 있으면 sourceActivity.id=null로 둔다. targetActivityId는 event.activityId와 같아야 한다.
 비교·전이의 역할별 근거는 해당 판단의 전체 evidence에도 모두 포함한다.

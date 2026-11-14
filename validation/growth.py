@@ -1,7 +1,33 @@
 # 성장 유형별 판단 조건 검증
 
+import re
+
 from core.errors import AnalysisError
 from validation.evidence import restore, check_evidence
+
+
+QUANTIFIED_CHANGE = re.compile(
+    r"(?<!\d)(\d+(?:[.,]\d+)?)\s*(ms|분|초|시간|건|개|회|%)\s*"
+    r"(?:에서|부터|→|->)\s*(\d+(?:[.,]\d+)?)\s*\2"
+)
+
+
+def quantified_change(comparison):
+    before = {(ref["recordId"], ref["quote"]) for ref in comparison["beforeEvidence"]}
+    after = {(ref["recordId"], ref["quote"]) for ref in comparison["afterEvidence"]}
+    pairs = {match.groups() for _, quote in before & after
+             for match in QUANTIFIED_CHANGE.finditer(quote)}
+    return next(iter(pairs)) if len(pairs) == 1 else None
+
+
+def preserve_comparison_numbers(comparison):
+    pair = quantified_change(comparison)
+    if pair is None:
+        return
+    first, unit, last = pair
+    for field, value in (("before", first + unit), ("after", last + unit)):
+        if value not in comparison[field] and len(comparison[field]) + len(value) + 3 <= 500:
+            comparison[field] += f" ({value})"
 
 
 def validate_assessment(item, activity_id, catalog, records):
@@ -26,6 +52,7 @@ def validate_assessment(item, activity_id, catalog, records):
             "beforeEvidence": role_evidence(item.comparison.beforeEvidence, "comparison_evidence_invalid"),
             "afterEvidence": role_evidence(item.comparison.afterEvidence, "comparison_evidence_invalid"),
         }
+        preserve_comparison_numbers(comparison)
 
     transfer = None
     if item.transfer:

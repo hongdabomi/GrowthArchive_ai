@@ -5,7 +5,7 @@ import hashlib
 import unicodedata
 
 from core.errors import AnalysisError
-from validation.growth import validate_assessment
+from validation.growth import validate_assessment, quantified_change
 
 
 def build_growth(model_events, catalog, records):
@@ -30,6 +30,18 @@ def build_growth(model_events, catalog, records):
         if not assessments:
             continue
 
+        description = model_event.description
+        for assessment in assessments:
+            comparison = assessment.get("comparison")
+            if assessment["type"] not in {"performance_improvement", "efficiency_improvement"} or comparison is None:
+                continue
+            pair = quantified_change(comparison)
+            if pair is not None:
+                first, unit, last = pair
+                change = f"{first}{unit} → {last}{unit}"
+                if change not in description and len(description) + len(change) + 2 <= 1000:
+                    description += f" {change}."
+
         evidence = {(ref["recordId"], ref["quote"])
                     for assessment in assessments for ref in assessment["evidence"]}
         if not any(by_id[record_id]["activityId"] == model_event.activityId for record_id, _ in evidence):
@@ -45,6 +57,6 @@ def build_growth(model_events, catalog, records):
                      for record_id, _ in evidence).astimezone(timezone.utc)
         events.append({"id": f"event-{len(events)}", "occurredAt": latest.strftime("%Y-%m"),
                        "activity": {"id": model_event.activityId, "name": by_activity[model_event.activityId]},
-                       "axis": axis, "title": model_event.title, "description": model_event.description,
+                       "axis": axis, "title": model_event.title, "description": description,
                        "growthAssessments": assessments})
     return events, list(axes.values())
