@@ -1,5 +1,6 @@
 #홈 챗봇, 활동 연결, 변화 감지
 
+import asyncio
 from collections import Counter
 import re
 
@@ -59,7 +60,7 @@ def find_source_quote(quote, sources):
 
 
 async def analyze_home(*, message, files, source_url, link_content, context, config, active_activity_id=None, active_activity_pending=False, recent_messages=None):
-    validate_files(files)
+    await asyncio.to_thread(validate_files, files)
     metadata = [{"id": file.id, "name": file.name} for file in files]
     payload = HomeModelInput(message=message, files=metadata, sourceUrl=source_url,
                              linkContent=link_content, context=context, activeActivityId=active_activity_id,

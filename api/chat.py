@@ -1,5 +1,6 @@
 # 사용자 입력 접수 및 분석 작업 실행
 
+import asyncio
 from uuid import uuid4
 from fastapi import APIRouter, BackgroundTasks, File, Form, Header, Request, UploadFile
 from fastapi.responses import JSONResponse
@@ -44,7 +45,7 @@ async def chat(request: Request, background_tasks: BackgroundTasks,
     finally:
         for file in files:
             await file.close()
-    validate_files(originals)
+    await asyncio.to_thread(validate_files, originals)
     service = request.app.state.jobs
     job, fresh = await service.accept(message=message, files=originals,
         conversation_id=identifier(conversationId), request_id=identifier(requestId))
