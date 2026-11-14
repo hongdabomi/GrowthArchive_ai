@@ -397,6 +397,32 @@ class AnalysisTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("analysis", result["result"])
         self.assertNotIn("evidenceSources", result["result"])
 
+    async def test_journey_catalog_input_is_stable_when_record_order_changes(self):
+        context = journey_context().model_dump()
+        forward = prepare_catalog(context)
+        context["records"].reverse()
+        self.assertEqual(prepare_catalog(context), forward)
+
+    async def test_journey_same_model_result_has_same_public_events(self):
+        model = JourneyModel.model_validate(growth_result())
+        with patch("journey.structured_response", return_value=model):
+            first = await analyze_journey(journey_context(), self.settings)
+            second = await analyze_journey(journey_context(), self.settings)
+        self.assertEqual(first["result"]["events"], second["result"]["events"])
+        self.assertEqual(first["result"]["summary"], second["result"]["summary"])
+
+    async def test_journey_trace_identifies_model_event_removed_by_status(self):
+        data = growth_result()
+        possible = deepcopy(data["events"][0])
+        possible["growthAssessments"][0]["status"] = "possible"
+        possible["growthAssessments"][0]["missingEvidence"] = ["비교 근거가 필요해요"]
+        data["events"].append(possible)
+        with self.assertLogs("uvicorn.error", level="INFO") as captured:
+            result = await self.analyze(data)
+        self.assertEqual(len(result["result"]["events"]), 1)
+        self.assertTrue(any("model=2 public=1" in line and "possible" in line for line in captured.output))
+        self.assertFalse(any("모델 학습" in line for line in captured.output))
+
     async def test_journey_summary_only_describes_public_confirmed_events(self):
         data = growth_result()
         data["summary"]["title"] = "봉사에서 시간을 줄였어요"

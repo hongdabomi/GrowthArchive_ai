@@ -2,6 +2,7 @@
 
 import json
 import re
+from datetime import datetime, timezone
 from core.errors import AnalysisError
 
 
@@ -22,7 +23,10 @@ def check_evidence(evidence, records):
 
 def prepare_catalog(context):
     catalog, metadata = [], []
-    for record in context["records"]:
+    # 같은 기록 집합은 전달 순서와 관계없이 같은 근거 ID와 모델 입력을 갖는다.
+    records = sorted(context["records"], key=lambda record: (
+        datetime.fromisoformat(record["savedAt"].replace("Z", "+00:00")).astimezone(timezone.utc), record["id"]))
+    for record in records:
         metadata.append({k: v for k, v in record.items() if k not in {"message", "summary"}})
         seen = set()
         for source in ("message", "summary"):

@@ -1,6 +1,8 @@
 # AI 성장 분석 실행 및 최종 결과 생성
 
 import json
+import hashlib
+import logging
 from pydantic import ValidationError
 from core.errors import AnalysisError
 from llm_client import structured_response
@@ -12,17 +14,37 @@ from validation.evidence import prepare_catalog, restore, check_evidence
 PROMPT_ID = "journey-v6"
 SCHEMA_ID = "journey-result-v2"
 CRITERIA_ID = "growth-criteria-v1"
+logger = logging.getLogger("uvicorn.error")
 
 
 async def analyze_journey(payload, config):
     context = payload.model_dump()
     model_input = prepare_catalog(context)
-    model = await structured_response(config, instructions=JOURNEY_PROMPT,
-                                      input=json.dumps(model_input, ensure_ascii=False), schema=JourneyModel)
-    catalog = model_input["evidenceCatalog"]
-    model_summary_evidence = restore(model.summary.evidence, catalog)
-    check_evidence(model_summary_evidence, context["records"])
-    events, axes = build_growth(model.events, catalog, context["records"])
+    input_text = json.dumps(model_input, ensure_ascii=False)
+    input_digest = hashlib.sha256(input_text.encode()).hexdigest()[:12]
+    try:
+        model = await structured_response(config, instructions=JOURNEY_PROMPT,
+                                          input=input_text, schema=JourneyModel)
+    except AnalysisError as error:
+        logger.warning("Journey model failed input=%s code=%s", input_digest, error.code)
+        raise
+    try:
+        catalog = model_input["evidenceCatalog"]
+        model_summary_evidence = restore(model.summary.evidence, catalog)
+        check_evidence(model_summary_evidence, context["records"])
+        events, axes = build_growth(model.events, catalog, context["records"])
+    except AnalysisError as error:
+        logger.warning("Journey validation failed input=%s code=%s", input_digest, error.code)
+        raise
+    logger.info("Journey events input=%s activities=%s model=%s public=%s decisions=%s",
+                input_digest, sorted({record["activityId"] for record in context["records"]}),
+                len(model.events), len(events),
+                [(index, item.activityId, hashlib.sha256(item.title.encode()).hexdigest()[:12],
+                  hashlib.sha256(item.axis.encode()).hexdigest()[:12],
+                  [(str(assessment.growthType), assessment.status,
+                    tuple(ref.evidenceId for ref in assessment.evidence),
+                    assessment.transfer.sourceActivity.id if assessment.transfer else None)
+                   for assessment in item.growthAssessments]) for index, item in enumerate(model.events)])
     if events:
         lines = [f'{event["activity"]["name"]}: {event["description"]}' for event in events]
         description = ""
