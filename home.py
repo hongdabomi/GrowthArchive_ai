@@ -43,6 +43,21 @@ def preserve_key_facts(summary, sources):
     return summary + supplement if len(summary) + len(supplement) <= 20_000 else summary
 
 
+def find_source_quote(quote, sources):
+    for source in sources:
+        if quote in source:
+            return quote
+    # 줄바꿈·연속 공백만 다른 인용은 원문에 있는 실제 구절로 되돌린다.
+    if not 12 <= len(quote) <= 500 or len(quote.split()) < 2:
+        return None
+    pattern = r"\s+".join(re.escape(part) for part in quote.split())
+    for source in sources:
+        match = re.search(pattern, source)
+        if match:
+            return match.group()
+    return None
+
+
 async def analyze_home(*, message, files, source_url, link_content, context, config, active_activity_id=None, active_activity_pending=False, recent_messages=None):
     validate_files(files)
     metadata = [{"id": file.id, "name": file.name} for file in files]
@@ -83,11 +98,13 @@ async def analyze_home(*, message, files, source_url, link_content, context, con
     if len(result.files) != len(expected) or {file.id for file in result.files} != expected:
         raise AnalysisError(502, "invalid_analysis", "분석 결과의 파일 목록이 실제 첨부와 다릅니다.")
     for change in result.changes:
-        for quote in change.evidence:
+        for index, quote in enumerate(change.evidence):
             if quote.startswith("file:") and quote[5:] in expected:
                 continue
-            if not any(quote in source for source in text_sources):
+            actual = find_source_quote(quote, text_sources)
+            if actual is None:
                 raise AnalysisError(502, "invalid_analysis", "분석 근거가 실제 입력·자료와 일치하지 않아요.")
+            change.evidence[index] = actual
     result.summary = preserve_key_facts(result.summary, current_sources)
     return response
 

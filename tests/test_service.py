@@ -270,6 +270,29 @@ class AnalysisTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(base64.b64decode(document["file_data"].split(",", 1)[1]), files[2].content)
         self.assertEqual(result.analysis.changes[0].evidence, data["analysis"]["changes"][0]["evidence"])
 
+    async def test_home_restores_exact_quote_when_only_whitespace_differs(self):
+        source = ("2026년 10월 6일, 이전에 만든 기록 조회 기능의 성능을 개선했습니다.\n"
+                  "원래 기록 전체를 읽던 구현을 검색 조건을 포함한 SQL로 교체하고 인덱스를 추가했습니다.")
+        file = UploadedFile("f1", "활동보고서.txt", "text/plain", source.encode())
+        data = home_result([file]).model_dump()
+        data["analysis"]["changes"] = [{"before": "기록 전체를 읽음", "after": "SQL 검색 조건과 인덱스 적용",
+            "category": "성능 개선", "evidence": [source.replace("\n", " ")]}]
+        with patch("home.structured_response", return_value=HomeResponse.model_validate(data)):
+            result = await analyze_home(message="자료를 분석해 주세요.", files=[file],
+                source_url=None, link_content=None, context=AnalysisContext(), config=self.settings)
+        self.assertEqual(result.analysis.changes[0].evidence, [source])
+
+    async def test_home_still_rejects_quote_absent_from_source(self):
+        file = UploadedFile("f1", "활동보고서.txt", "text/plain", "검색 응답이 1200ms에서 320ms로 줄었습니다.".encode())
+        data = home_result([file]).model_dump()
+        data["analysis"]["changes"] = [{"before": "1200ms", "after": "50ms", "category": "성능 개선",
+            "evidence": ["검색 응답이 1200ms에서 50ms로 줄었습니다."]}]
+        with patch("home.structured_response", return_value=HomeResponse.model_validate(data)):
+            with self.assertRaises(AnalysisError) as caught:
+                await analyze_home(message="자료를 분석해 주세요.", files=[file],
+                    source_url=None, link_content=None, context=AnalysisContext(), config=self.settings)
+        self.assertEqual(caught.exception.code, "invalid_analysis")
+
     async def test_home_preserves_explicit_metadata_and_comparison_facts(self):
         original = ("활동 상태: 완료\n담당 역할: 백엔드 개발\n활동 기간: 2026-01~2026-02\n"
                     "제가 작업 시간을 30분→8분으로 줄였어요.\n"
